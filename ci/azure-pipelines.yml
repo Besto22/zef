@@ -1,0 +1,141 @@
+trigger:
+- main
+
+pr:
+- main
+
+variables:
+  # Turn this Powershell console into a developer powershell console.
+  # https://intellitect.com/enter-vsdevshell-powershell/
+  PWSH_DEV: |
+    $installPath = &"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationpath
+    $devShell    = &"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find **\Microsoft.VisualStudio.DevShell.dll
+    Import-Module $devShell
+    Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
+
+  TEST_COMMANDS: |
+    raku -I. bin/zef --version
+
+    # Run xtests
+    raku -I. xt/repository.rakutest
+    raku -I. xt/install.rakutest
+
+    # Test explicitly via `prove t/*` and `raku t/foo.rakutest && raku t/bar.rakutest`
+    # (both should work, since all our CI envs have prove)
+    raku -I. bin/zef --debug --/tap-harness --/prove --raku-test  test .
+    raku -I. bin/zef --debug --/tap-harness --prove  --/raku-test test .
+
+    # Run relative local path test + install
+    raku -I. bin/zef --debug install .
+
+    # Test uninstall
+    raku -I. bin/zef uninstall zef
+
+    # run absolute local path test + install
+    raku -I. bin/zef install "$(System.DefaultWorkingDirectory)"
+
+    # Change path to make sure next `zef` commands aren't using any files in cwd or lib/
+    cd "$(System.DefaultWorkingDirectory)/.."
+    zef update --debug
+
+    # Test informational commands
+    zef --version
+    zef --help
+    zef locate Zef::CLI
+    zef locate lib/Zef/CLI.rakumod
+    zef browse zef bugtracker --/open
+    zef info zef
+
+    # Test bells and whistles
+    zef --debug test "$(System.DefaultWorkingDirectory)"
+    zef --debug search Base64
+    zef --debug rdepends Base64
+    zef --debug depends Cro::SSL
+    zef --debug fetch Base64
+    # test installing from what previous `fetch` put in ::LocalCache
+    zef --debug --/fez --/cpan --/p6c --/rea --cached install Base64
+
+    zef --debug --max=10 list
+    zef --debug --installed list
+    zef --debug --force-install install Base64
+
+    # test tar + upgrade
+    zef --debug install https://github.com/ugexe/Raku-PathTools/archive/0434191c56e0f3254ab1d756d90f9191577de5a0.tar.gz
+    zef --debug upgrade PathTools
+
+    # Test zip
+    zef --debug install https://github.com/ugexe/Raku-Text--Table--Simple/archive/v0.0.3.zip
+
+    # Test remote git repo + tag
+    zef --debug install https://github.com/ugexe/Raku-Text--Table--Simple.git@v0.0.4
+
+    # Test self contained installation
+    zef install Distribution::Common --/test
+    zef install Distribution::Common::Remote -to=inst#foo --contained --/test
+    zef uninstall Distribution::Common
+    raku -I inst#foo -M Distribution::Common::Remote::Github -e ""
+
+    zef --/confirm nuke TempDir StoreDir
+    zef update cached --debug # Test single repository update; should be 0 after previous nuke
+    raku -I "$(System.DefaultWorkingDirectory)" "$(System.DefaultWorkingDirectory)/bin/zef" --/confirm nuke site home
+
+stages:
+- stage: Test
+  jobs:
+    - job: T
+      strategy:
+       matrix:
+         Win_MVM:
+           IMAGE_NAME: 'windows-2022'
+         Mac_MVM:
+           IMAGE_NAME: 'macOS-12'
+         Lin_MVM:
+           IMAGE_NAME: 'ubuntu-22.04'
+      pool:
+        vmImage: $(IMAGE_NAME)
+      workspace:
+        clean: all
+      timeoutInMinutes: 45
+      steps:
+        - script: |
+            set -e
+
+            # Install rakubrew, rakudo, and zef
+            curl https://rakubrew.org/install-on-perl.sh -o install-on-perl.sh
+            sh install-on-perl.sh
+            eval "$(/$HOME/.rakubrew/bin/rakubrew init Bash)"
+            rakubrew download
+
+            # Uninstall zef that came with `rakubrew download` since we are testing the zef repo
+            # (if you're copying this pipeline file you probably want to skip this command)
+            zef uninstall zef
+
+            # Run zef test commands
+            ${{ variables.TEST_COMMANDS }}
+          failOnStderr: false
+          condition: ne( variables['Agent.OS'], 'Windows_NT' )
+          displayName: Test Zef
+        - pwsh: |
+            # Update powershell to 7.3+ for 'Enable-ExperimentalFeature PSNativeCommandErrorActionPreferenceFeatureName'
+            iex "& { $(irm https://aka.ms/install-powershell.ps1) } -Preview"
+            # dotnet tool install --global PowerShell --version 7.2.6
+
+            ${{ variables.PWSH_DEV }}
+
+            # Like set -e, but requires powershell-core 7.3+
+            Enable-ExperimentalFeature PSNativeCommandErrorActionPreferenceFeatureName
+
+            # Install rakubrew, rakudo, and zef
+            . {iwr -useb https://rakubrew.org/install-on-powershell.ps1 } | iex
+            . "C:\rakubrew\bin\rakubrew.exe" init PowerShell | Out-String | Invoke-Expression
+            rakubrew download
+
+            # Uninstall zef that came with `rakubrew download` since we are testing the zef repo.
+            # (if you're copying this pipeline file you probably want to skip this command)
+            zef uninstall zef
+
+            # Run zef test commands
+            ${{ variables.TEST_COMMANDS }}            
+          failOnStderr: false
+          condition: eq( variables['Agent.OS'], 'Windows_NT' )
+          displayName: Test Zef (Windows)
