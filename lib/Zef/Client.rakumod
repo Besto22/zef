@@ -923,6 +923,8 @@ class Zef::Client {
         # Setup(?) Phase:
         # Attach appropriate metadata so we can do --dry runs using -I/some/dep/path
         # and can install after we know they pass any required tests
+        # This linking is only needed for the build phase which occurs before we install to
+        # the staging repo.
         my @linked-candidates = self.link-candidates(@sorted-candidates);
         die "Something went terribly wrong linking the distributions" unless +@linked-candidates;
 
@@ -932,6 +934,24 @@ class Zef::Client {
             my @built-candidates = ?$build ?? self.build(@_) !! @_;
             die "No installable candidates remain after `build` failures" unless +@built-candidates;
 
+            # Install to staging repo
+            # Need to move all this into self.install
+            my $staging-at = %!config<TempDir>.IO.child("{time}.{$*PID}.{(^10000).rand}");
+            die "failed to create directory: {$staging-at.absolute}"
+                unless ($staging-at.IO.e || mkdir($staging-at));
+            # XXX: Need to work so name/next-repo works when installing to multiple repos (when @curs.elems > 1)
+            use CompUnit::Repository::Staging;
+            my $staging-repo = CompUnit::Repository::Staging.new(
+                :prefix($staging-at),
+                :name(@curs.head.name),
+                :next-repo(@curs.head),
+            );
+            my @staged-candidates = ?$dry ?? @built-candidates !! @built-candidates.map({
+                my Str @includes = "inst#{$staging-at.absolute}";
+                $_.dist.metainfo<includes> = @includes;
+                $staging-repo.install($_.dist);
+                $_;
+            });
 
             # Test Phase:
             my @tested-candidates = !$test
@@ -944,7 +964,11 @@ class Zef::Client {
             # Install Phase:
             # Ideally `--dry` uses a special unique CompUnit::Repository that is meant to be deleted entirely
             # and contain only the modules needed for this specific run/plan
-            my @installed-candidates = ?$dry ?? @tested-candidates !! self.install(:@curs, @tested-candidates);
+            my @installed-candidates = ?$dry ?? @tested-candidates !! do {
+                # XXX: make this work when @curs.elems > 1
+                copy-paths($staging-repo.prefix, @curs.head.prefix);
+                @tested-candidates;
+            }
 
             # Report phase:
             # Handle exit codes for various option permutations like --force
